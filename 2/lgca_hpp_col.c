@@ -47,6 +47,8 @@ typedef struct {
     int finish;
     int rank; /* Номер процесса, k */
     int num_tasks; /* Число процессов, P*/
+    MPI_Datatype block_type;
+    MPI_Datatype column_type;
 } lgca_t;
 
 
@@ -78,8 +80,12 @@ void lgca_clear(lgca_t *l, int pos);
 /* Запись в файл суммы для уточнения правильности распараллеливания */ 
 void lgca_write_sum(const lgca_t *l, int n_frames);
 
+/* Зануление сетки за пределами start и finish */
+void lgca_clear_lattice(lgca_t *l);
+
 /* Сбор поля у последнего процесса. */
 void lgca_gather(lgca_t *l);
+void lgca_gather_block(lgca_t *l);
 
 int main(int argc, char **argv)
 {
@@ -89,13 +95,13 @@ int main(int argc, char **argv)
     lgca_initial(&lattice);
     int i;
     char buf[100];
-    int n_frames = 1000;
+    int n_frames = 2500;
     double t = MPI_Wtime();
     for (i = 0; i < n_frames; i++) {
 	if (argv[1][0] == '1') {
-        if (i % 10 == 0) {
+        if ((i % 10 == 0) && (i <= 1000)) {
             sprintf(buf, "vtk/lgca_%06d.vtk", i);
-            lgca_gather(&lattice);
+            lgca_gather_block(&lattice);
             if (lattice.rank == lattice.num_tasks - 1) {
                 lgca_save_vtk(buf, &lattice);
             }
@@ -107,6 +113,8 @@ int main(int argc, char **argv)
 	    lgca_write_sum(&lattice, n_frames);
         }
 	}
+	
+        lgca_clear_lattice(&lattice);
         lgca_propagate(&lattice);
         lgca_border_exchange(&lattice);
         lgca_collide(&lattice);
@@ -114,20 +122,30 @@ int main(int argc, char **argv)
     }
 
     if (argv[3][0] == '1') {
-	    FILE *fp;
-	    char name[] = "lgca_time.txt";
-	    if ((fp = fopen(name, "a")) == NULL) {
-		    printf("Can't find file");
-		    return 1;
-	    }
-	    if (lattice.rank == 0) {
-		    t = MPI_Wtime() - t;
-		    fprintf(fp, "%d %f\n", lattice.num_tasks, t);
-	    } 
+	FILE *fp;
+	char name[] = "lgca_time.txt";
+	if ((fp = fopen(name, "a")) == NULL) {
+		printf("Can't find file");
+		return 1;
+	}
+	if (lattice.rank == 0) {
+		t = MPI_Wtime() - t;
+		fprintf(fp, "%d %f\n", lattice.num_tasks, t);
+	} 
     }
     lgca_free(&lattice);
     MPI_Finalize();
     return 0;
+}
+
+void lgca_clear_lattice(lgca_t *l) {
+    for (int j = 0; j < l->ymax; j++) {
+        for (int i = 0; i < l->xmax; i++) {
+            if ((j < l->start) || (j >= l->finish))
+                l->lattice[ind(i, j)] = 0;
+                l->lattice_buf[ind(i, j)] = 0;
+        }
+    }
 }
 
 void lgca_write_sum(const lgca_t *l, int n_frames) {
@@ -140,22 +158,22 @@ void lgca_write_sum(const lgca_t *l, int n_frames) {
 }
 
 void lgca_clear(lgca_t *l, int pos) {
-    for (int i = 0; i < l->xmax; i++) {
+    for (int i = 0; i < l->ymax; i++) {
         if (pos == -1) {
-            l->lattice[ind(i, l->start - 1)] = 10;
+            l->lattice[ind(l->start - 1, i)] = 0;
         } else if (pos == 1) {
-            l->lattice[ind(i, l->finish)] = 10;
+            l->lattice[ind(l->finish, i)] = 0;
         }
     }
 }
 
 void lgca_add_sub(lgca_t *l, unsigned char *sub, int pos) {
-    for (int i = 0; i < l->xmax; i++) {
-        if ((get_nth_bit(sub[i], 0) == 1) && (pos == -1)) {
-            set_nth_bit(1, 0, &(l->lattice[ind(i, l->start)]));
+    for (int i = 0; i < l->ymax; i++) {
+        if ((get_nth_bit(sub[i], 1) == 1) && (pos == -1)) {
+            set_nth_bit(1, 1, &(l->lattice[ind(l->start, i)]));
         }
-        else if ((get_nth_bit(sub[i], 2) == 1) && (pos == 1)) {
-            set_nth_bit(1, 2, &(l->lattice[ind(i, l->finish-1)]));
+        else if ((get_nth_bit(sub[i], 3) == 1) && (pos == 1)) {
+            set_nth_bit(1, 3, &(l->lattice[ind(l->finish-1, i)]));
         }
     }
 }
@@ -164,34 +182,34 @@ void lgca_border_exchange(lgca_t *l) {
     if (l->num_tasks == 1) return;
 
     int rank = l->rank;
-    int xmax = l->xmax;
+    int ymax = l->ymax;
 
     if (rank == 0) {
-        unsigned char right[xmax];
+        unsigned char right[ymax];
 
-        MPI_Send(&(l->lattice[ind(0, l->finish)]), xmax, MPI_CHAR, 1, 0, MPI_COMM_WORLD);
-	lgca_clear(l, 1);
-        MPI_Recv(right, xmax, MPI_CHAR, 1, 0, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+        MPI_Send(&(l->lattice[ind(l->finish, 0)]), 1, l->column_type, 1, 0, MPI_COMM_WORLD);
+        lgca_clear(l, 1);
+	    MPI_Recv(right, ymax, MPI_CHAR, 1, 0, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
         lgca_add_sub(l, right, 1);
     } else if (rank == l->num_tasks - 1) {
-        unsigned char left[xmax];
+        unsigned char left[ymax];
 
-        MPI_Send(&(l->lattice[ind(0, l->start-1)]), xmax, MPI_CHAR, l->num_tasks - 2, 0, MPI_COMM_WORLD);
-	lgca_clear(l, -1);
-        MPI_Recv(left, xmax, MPI_CHAR, l->num_tasks - 2, 0, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+        MPI_Send(&(l->lattice[ind(l->start-1, 0)]), 1, l->column_type, l->num_tasks - 2, 0, MPI_COMM_WORLD);
+        lgca_clear(l, -1);
+	    MPI_Recv(left, ymax, MPI_CHAR, l->num_tasks - 2, 0, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
         lgca_add_sub(l, left, -1);
     } else {
-        unsigned char right[xmax];
-        unsigned char left[xmax];
+        unsigned char right[ymax];
+        unsigned char left[ymax];
 
-        MPI_Send(&(l->lattice[ind(0, l->finish)]), xmax, MPI_CHAR, rank + 1, 0, MPI_COMM_WORLD);
-	lgca_clear(l, 1);
-        MPI_Recv(right, xmax, MPI_CHAR, rank + 1, 0, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+        MPI_Send(&(l->lattice[ind(l->finish, 0)]), 1, l->column_type, rank + 1, 0, MPI_COMM_WORLD);
+        lgca_clear(l, 1);
+        MPI_Recv(right, ymax, MPI_CHAR, rank + 1, 0, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
         lgca_add_sub(l, right, 1);
 
-        MPI_Send(&(l->lattice[ind(0, l->start-1)]), xmax, MPI_CHAR, rank - 1, 0, MPI_COMM_WORLD);
-	lgca_clear(l, -1);
-        MPI_Recv(left, xmax, MPI_CHAR, rank - 1, 0, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+        MPI_Send(&(l->lattice[ind(l->start-1, 0)]), 1, l->column_type, rank - 1, 0, MPI_COMM_WORLD);
+        lgca_clear(l, -1);
+	    MPI_Recv(left, ymax, MPI_CHAR, rank - 1, 0, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
         lgca_add_sub(l, left, -1);
     }
 }
@@ -207,6 +225,20 @@ void lgca_gather(lgca_t *l)
         }
     } else {
         MPI_Send(l->lattice + ind(0, l->start), (l->finish - l->start) * l->xmax, MPI_CHAR, l->num_tasks - 1, 0, MPI_COMM_WORLD);
+    }
+}
+
+void lgca_gather_block(lgca_t *l)
+{
+    if (l->rank == l->num_tasks - 1) {
+        int k;
+        for (k = 0; k < l->num_tasks - 1; k++) {
+            int start, finish;
+            decomposition(l->xmax, l->num_tasks, k, &start, &finish);
+            MPI_Recv(l->lattice + ind(start, 0), 1, l->block_type, k, 0, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+        }
+    } else {
+        MPI_Send(l->lattice + ind(l->start, 0), 1, l->block_type, l->num_tasks - 1, 0, MPI_COMM_WORLD);
     }
 }
 
@@ -276,8 +308,8 @@ int lgca_sum(const lgca_t *l)
 {
     int i, j, d;
     int cnt = 0;
-    for (j = l->start; j < l->finish; j++) {
-        for (i = 0; i < l->xmax; i++) {
+    for (j = 0; j < l->ymax; j++) {
+        for (i = l->start; i < l->finish; i++) {
             unsigned char v = l->lattice[ind(i,j)];
             for (d = 0; d < 4; d++) {
                 cnt += get_nth_bit(v, d);
@@ -291,8 +323,8 @@ void lgca_collide(lgca_t *l)
 {
     int i, j;
     int col_cnt = 0;
-    for (j = l->start; j < l->finish; j++) {
-        for (i = 0; i < l->xmax; i++) {
+    for (j = 0; j < l->ymax; j++) {
+        for (i = l->start; i < l->finish; i++) {
             unsigned char v = l->lattice[ind(i,j)];
             if (v == 10) { l->lattice[ind(i,j)] = 5; col_cnt++; }
             if (v ==  5) { l->lattice[ind(i,j)] = 10; col_cnt++; }
@@ -307,8 +339,8 @@ void lgca_collide(lgca_t *l)
 void lgca_bounds(lgca_t *l)
 {
     int i, j;
-    for (j = l->start; j < l->finish; j++) {
-        for (i = 0; i < l->xmax; i++) {
+    for (j = 0; j < l->ymax; j++) {
+        for (i = l->start; i < l->finish; i++) {
             unsigned char v = l->lattice[ind(i,j)];
             if (v == WALL) continue;
             if (get_nth_bit(v, 0) && l->lattice[ind(i,j+1)] == WALL) lgca_set_value(i, j, 2, 1, l);
@@ -323,8 +355,8 @@ void lgca_bounds(lgca_t *l)
 void lgca_propagate(lgca_t *l)
 {
     int i, j;
-    for (j = l->start; j < l->finish; j++) {
-        for (i = 0; i < l->xmax; i++) {
+    for (j = 0; j < l->ymax; j++) {
+        for (i = l->start; i < l->finish; i++) {
             unsigned char v = l->lattice[ind(i,j)];
             if (v == WALL) continue;
             if (get_nth_bit(v, 0) && l->lattice[ind(i,j+1)] != WALL) {
@@ -354,7 +386,7 @@ void lgca_set_value(const int i, const int j, const int direction, const unsigne
 
 void lgca_init(lgca_t *l)
 {
-    l->xmax = 150;
+    l->xmax = 100;
     l->ymax = 100;
     l->lattice = calloc(lgca_size(l), sizeof(unsigned char));
     l->lattice_buf = calloc(lgca_size(l), sizeof(unsigned char));
@@ -363,8 +395,16 @@ void lgca_init(lgca_t *l)
     /* Этап декомпозиции. */
     MPI_Comm_size(MPI_COMM_WORLD, &(l->num_tasks));
     MPI_Comm_rank(MPI_COMM_WORLD, &(l->rank));
-    decomposition(l->ymax, l->num_tasks, l->rank, &(l->start), &(l->finish));
+    decomposition(l->xmax, l->num_tasks, l->rank, &(l->start), &(l->finish));
     printf("#%d: start = %d, end = %d\n", l->rank, l->start, l->finish);
+
+    int start, finish;
+    decomposition(l->xmax, l->num_tasks, 0, &start, &finish);
+    MPI_Type_vector(l->ymax, finish-start, l->xmax, MPI_CHAR, &(l->block_type));
+    MPI_Type_commit(&(l->block_type));
+
+    MPI_Type_vector(l->ymax, 1, l->xmax, MPI_CHAR, &(l->column_type));
+    MPI_Type_commit(&(l->column_type));
 }
 
 void lgca_free(lgca_t *l)
@@ -373,6 +413,8 @@ void lgca_free(lgca_t *l)
     l->ymax = 0;
     free(l->lattice);
     free(l->lattice_buf);
+    MPI_Type_free(&(l->block_type));
+    MPI_Type_free(&(l->column_type));
 }
 
 void lgca_save_vtk(const char *path, const lgca_t *l)
