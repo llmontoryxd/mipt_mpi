@@ -102,9 +102,10 @@ int main(int argc, char **argv)
         }
 	}
 	if (argv[2][0] == '1') {
+        int sum = lgca_sum(&lattice);
         if (lattice.rank == 0) {
-            printf("#%d: Sum = %d\n", i, lgca_sum(&lattice));
-	    lgca_write_sum(&lattice, n_frames);
+            printf("#%d: Sum = %d\n", i, sum);
+	    //lgca_write_sum(&lattice, n_frames);
         }
 	}
 	
@@ -286,7 +287,11 @@ int lgca_sum(const lgca_t *l)
             }
         }
     }
-    return cnt;
+    
+
+    int cnt_all;
+    MPI_Allreduce(&cnt, &cnt_all, 1, MPI_INT, MPI_SUM, MPI_COMM_WORLD);
+    return cnt_all;
 }    
 
 void lgca_collide(lgca_t *l)
@@ -356,8 +361,8 @@ void lgca_set_value(const int i, const int j, const int direction, const unsigne
 
 void lgca_init(lgca_t *l)
 {
-    l->xmax = 1000;
-    l->ymax = 1000;
+    l->xmax = 100;
+    l->ymax = 100;
     l->lattice = calloc(lgca_size(l), sizeof(unsigned char));
     l->lattice_buf = calloc(lgca_size(l), sizeof(unsigned char));
     
