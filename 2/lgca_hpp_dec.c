@@ -28,6 +28,7 @@
 #include <math.h>
 #include <mpi.h>
 #include <string.h>
+#include <omp.h>
 
 #define ind(i, j) (((i + l->xmax) % l->xmax) + ((j + l->ymax) % l->ymax) * (l->xmax))
 
@@ -60,6 +61,9 @@ typedef struct {
     MPI_Comm col_comm; /* Коммуникатор столбца. */
     MPI_Datatype row_type; /* Тип блока в строчке. */
     MPI_Datatype col_type; /* Тип блока в колонке по все ширине поля. */
+
+    /* OpenMP */
+    int omp_num_threads;
 } lgca_t;
 
 
@@ -157,7 +161,7 @@ int main(int argc, char **argv)
 	}
 	if (lattice.rank == 0) {
 		t = MPI_Wtime() - t;
-		fprintf(fp, "%d %f\n", lattice.num_tasks, t);
+		fprintf(fp, "%d %f\n", lattice.num_tasks * lattice.omp_num_threads, t);
 	} 
     }
     lgca_free(&lattice);
@@ -534,6 +538,7 @@ void lgca_collide(lgca_t *l)
 {
     int i, j;
     int col_cnt = 0;
+    #pragma omp parallel for collapse(2)
     for (j = l->start[1]; j < l->finish[1]; j++) {
         for (i = l->start[0]; i < l->finish[0]; i++) {
             unsigned char v = l->lattice[ind(i,j)];
@@ -550,6 +555,7 @@ void lgca_collide(lgca_t *l)
 void lgca_bounds(lgca_t *l)
 {
     int i, j;
+    #pragma omp parallel for collapse(2)
     for (j = l->start[1]; j < l->finish[1]; j++) {
         for (i = l->start[0]; i < l->finish[0]; i++) {
             unsigned char v = l->lattice[ind(i,j)];
@@ -560,12 +566,14 @@ void lgca_bounds(lgca_t *l)
             if (get_nth_bit(v, 3) && l->lattice[ind(i-1,j)] == WALL) lgca_set_value(i, j, 1, 1, l);
         }
     }
+    
 }
 
 
 void lgca_propagate(lgca_t *l)
 {
     int i, j;
+    #pragma omp parallel for collapse(2)
     for (j = l->start[1]; j < l->finish[1]; j++) {
         for (i = l->start[0]; i < l->finish[0]; i++) {
             unsigned char v = l->lattice[ind(i,j)];
@@ -585,6 +593,7 @@ void lgca_propagate(lgca_t *l)
             l->lattice[ind(i,j)] = 0;
         }
     }
+    
     unsigned char *t = l->lattice;
     l->lattice = l->lattice_buf;
     l->lattice_buf = t;
@@ -597,10 +606,15 @@ void lgca_set_value(const int i, const int j, const int direction, const unsigne
 
 void lgca_init(lgca_t *l)
 {
-    l->xmax = 100;
-    l->ymax = 100;
+    l->xmax = 1000;
+    l->ymax = 1000;
     l->lattice = calloc(lgca_size(l), sizeof(unsigned char));
     l->lattice_buf = calloc(lgca_size(l), sizeof(unsigned char));
+
+    #pragma omp parallel 
+    {
+        l->omp_num_threads = omp_get_num_threads();
+    }
     
     
     /* Этап декомпозиции. */
